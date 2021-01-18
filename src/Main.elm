@@ -8,18 +8,25 @@ import Html.Attributes as HA
 import Html.Events as HE
 import Task
 import Json.Decode as JD
+import Parser as P exposing (Parser, (|.), (|=))
+import Set as S
 
 type alias Uid = Int
 type alias Message = { sender : Uid , content : List MessagePart }
+type alias Petnames = Dict Uid String
 type MessagePart = StringPart String | UidPart Uid
-
+type alias UidRenderConfig =
+  { petnames : Petnames
+  , focusedUid : Maybe Uid
+  }
 
 type alias Model =
-    { petnames : Dict Uid String
+    { petnames : Petnames
     , focusedUid : Maybe Uid
     , draft : String
     , messages : List Message
     , loggedInUid : Uid
+    , userInfo : Dict Uid {preferredNickname : String}
     }
 
 
@@ -46,6 +53,11 @@ init _ =
       , { sender=4506, content=[StringPart "WORDS OF PRAISE FOR FISHFOOD"] }
       , { sender=11496, content=[StringPart "ACKNOWLEDGEMENT AND ACCEPTENCE OF TERMS"] }
       ]
+    , userInfo = D.fromList
+        [ (14804, {preferredNickname="Donut"})
+        , (4506, {preferredNickname="Eurakarte"})
+        , (11496, {preferredNickname="Miles Prower"})
+        ]
     }
   , Task.attempt (always Ignore) <| Browser.Dom.focus "draft"
   )
@@ -92,6 +104,10 @@ update msg model =
 
 view : Model -> Html Msg
 view model =
+  let
+    uidcfg : UidRenderConfig
+    uidcfg = { petnames = model.petnames , focusedUid = model.focusedUid }
+  in
     H.div [HA.style "padding" "1em"]
         [ case model.focusedUid of
             Just uid -> H.div [] [ H.text <| "User id " ++ String.fromInt uid ++ ": petname = "
@@ -103,14 +119,25 @@ view model =
                                     , HA.value (D.get uid model.petnames |> Maybe.withDefault "")
                                     ]
                                     []
-                                 ]
+                                  , case D.get uid model.userInfo of
+                                      Nothing -> H.text ""
+                                      Just {preferredNickname} ->
+                                        H.span []
+                                          [ H.text <| " (User's preferred nickname: " ++ preferredNickname
+                                          , H.button [HE.onClick (SetPetname uid preferredNickname)] [H.text "use it?"]
+                                          , H.text ")"
+                                          ]
+                                  ]
             Nothing -> H.div [HA.style "color" "red"] [H.text "Click on a user-id (u/...) to set a petname for them."]
         , model.messages
-            |> List.map (viewMessage model.petnames)
+            |> List.map (viewMessage uidcfg)
             |> H.div []
         , let
             rendered : List MessagePart
-            rendered = parseMessageParts {loggedInUid=model.loggedInUid, petnames=model.petnames, raw=model.draft}
+            rendered =
+              case P.run (messagePartsParser model.petnames) model.draft of
+                Ok mps -> mps
+                Err e -> Debug.todo <| Debug.toString e
           in
             H.div [HA.style "background-color" "#cccccc", HA.style "padding" "0.5em"]
             [ H.text "Type a message, reference a user with '@petname' or '@u/12345', and hit Enter to send:"
@@ -125,78 +152,71 @@ view model =
                 ]
                 []
             , H.br [] []
-            , viewMessage model.petnames {sender=model.loggedInUid, content=rendered}
+            , viewMessage uidcfg {sender=model.loggedInUid, content=rendered}
             ]
         ]
         
-viewMessage : Dict Uid String -> Message -> Html Msg
-viewMessage petnames {sender, content} =
-    H.div []
-        [ viewUid petnames sender
+viewMessage : UidRenderConfig -> Message -> Html Msg
+viewMessage uidcfg {sender, content} =
+    H.div [HA.style "font-family" "'Courier New', Courier, monospace"]
+        [ viewUid uidcfg sender
         , H.text ": "
-        , content |> List.map (viewMessagePart petnames) |> H.span []
+        , content |> List.map (viewMessagePart uidcfg) |> H.span []
         ]
 
-viewUid : Dict Uid String -> Uid -> Html Msg
-viewUid petnames uid =
-    case D.get uid petnames of
-        Just name -> H.strong [HE.onClick (FocusUid (Just uid)), HA.style "outline" "1px solid lightgreen"] [H.text <| "@" ++ name]
-        Nothing -> H.strong [HE.onClick (FocusUid (Just uid)), HA.style "outline" "1px solid red"] [H.text <| "@u/" ++ (String.fromInt uid)]
+viewUid : UidRenderConfig -> Uid -> Html Msg
+viewUid {petnames, focusedUid} uid =
+  let
+    background =
+      if focusedUid == Just uid then
+        "lightgray"
+      else if D.member uid petnames then
+        "lightgreen"
+      else
+        "pink"
+    
+    text = "@" ++ (D.get uid petnames |> Maybe.withDefault ("u/" ++ String.fromInt uid))
+  in
+    H.strong
+      [ HE.onClick (FocusUid (Just uid))
+      , HA.style "background-color" background
+      ]
+      [H.text text]
 
-viewMessagePart : Dict Uid String -> MessagePart -> Html Msg
-viewMessagePart petnames part =
+viewMessagePart : UidRenderConfig -> MessagePart -> Html Msg
+viewMessagePart cfg part =
   case part of
     StringPart s -> H.text s
-    UidPart uid -> viewUid petnames uid
+    UidPart uid -> viewUid cfg uid
 
-parseMessageParts : {loggedInUid : Uid, raw : String, petnames : Dict Uid String} -> List MessagePart
-parseMessageParts {loggedInUid, raw, petnames} =
-  let
-    splitFirstPart : String -> Maybe (MessagePart, String)
-    splitFirstPart rem =
-      if rem == "" then
-        Nothing 
-      else Just <|
-        case String.indices "@" rem of
-          [] -> (StringPart rem, "")
-          0 :: _ -> 
-            let
-              firstWord : String
-              firstWord = case List.head <| String.words rem of
-                Nothing -> Debug.todo "impossible"
-                Just s -> s
-
-              ident : String
-              ident = String.dropLeft 1 firstWord
-
-              nextRem : String
-              nextRem = String.dropLeft (String.length firstWord) rem
-
-              -- _ = Debug.log <| Debug.toString {firstWord=firstWord, ident=ident, nextRem=nextRem}
-              
-              referencedUid : Maybe Uid
-              referencedUid =
-                if String.startsWith "u/" ident
-                  then String.toInt (String.dropLeft 2 ident)
-                  else 
-                    petnames
-                    |> D.toList
-                    |> List.filter (\(uid, name) -> name == ident)
-                    |> List.map (\(uid, name) -> uid)
-                    |> List.head
-            in
-              case referencedUid of
-                Nothing -> (StringPart ("@" ++ ident), nextRem)
-                Just uid -> (UidPart uid, nextRem)
-          i :: _ -> (StringPart (String.left i rem), String.dropLeft i rem)
-  in
-    unfold splitFirstPart raw
-
-unfold : (seed -> Maybe (a, seed)) -> seed -> List a
-unfold f seed =
-  case f seed of
-    Just (x, next) -> x :: unfold f next
-    Nothing -> []
+messagePartsParser : Petnames -> P.Parser (List MessagePart)
+messagePartsParser petnames =
+  P.sequence
+    { start = ""
+    , separator = ""
+    , end = ""
+    , spaces = P.symbol ""
+    , item = P.oneOf
+        [ P.succeed UidPart
+            |. P.backtrackable (P.symbol "@u/")
+            |= P.int
+        , P.succeed UidPart
+            |. P.backtrackable (P.symbol "@")
+            |= P.oneOf (petnames
+                        |> D.toList
+                        |> List.map (\(uid, petname) -> P.map (always uid) (P.keyword petname))
+                        )
+        , P.succeed (StringPart "@")
+            |. P.symbol "@"
+        , P.succeed StringPart
+            |= P.variable
+                { start = (always True)
+                , inner = (\c -> c /= '@')
+                , reserved = S.empty
+                }
+        ]
+    , trailing = P.Forbidden
+    }
 
 onEnter : Msg -> H.Attribute Msg
 onEnter m =
