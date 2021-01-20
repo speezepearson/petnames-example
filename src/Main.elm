@@ -209,17 +209,20 @@ messagePartsParser petnames =
     , end = ""
     , spaces = P.symbol ""
     , item = P.oneOf
-        [ P.succeed UidPart
-            |. P.backtrackable (P.symbol "@u/")
-            |= P.int
-        , P.succeed UidPart
-            |. P.backtrackable (P.symbol "@")
-            |= P.oneOf (petnames
-                        |> D.toList
-                        |> List.map (\(uid, petname) -> P.map (always uid) (P.keyword petname))
-                        )
-        , P.succeed (StringPart "@")
+        [ P.succeed (\x -> x)
             |. P.symbol "@"
+            |= P.oneOf
+                [ P.succeed UidPart
+                    |. P.symbol "u/"
+                    |= P.int
+                , P.succeed UidPart
+                    |= P.oneOf (petnames
+                                |> D.toList
+                                |> List.sortBy (\(_, petname) -> -(String.length petname))
+                                |> List.map (\(uid, petname) -> P.map (always uid) (P.keyword petname))
+                                )
+                , P.succeed (StringPart "@")
+                ]
         , P.succeed StringPart
             |= P.variable
                 { start = (always True)
