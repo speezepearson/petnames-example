@@ -10,6 +10,7 @@ import Task
 import Json.Decode as JD
 import Parser as P exposing (Parser, (|.), (|=))
 import Set as S
+import Levenshtein
 
 type alias Uid = Int
 type alias Message = { sender : Uid , content : List MessagePart }
@@ -32,7 +33,10 @@ type alias Model =
 
 init : () -> ( Model , Cmd Msg )
 init _ =
-  ( { petnames = D.singleton 13786 "self"
+  ( { petnames = D.fromList
+        [ (13786, "self")
+        , (12345, "Eurokarte")
+        ]
     , focusedUid = Nothing
     , draft = ""
     , loggedInUid = 13786
@@ -123,8 +127,16 @@ view model =
                                       Nothing -> H.text ""
                                       Just {preferredNickname} ->
                                         H.span []
-                                          [ H.text <| " (User's preferred nickname: " ++ preferredNickname
-                                          , H.button [HE.onClick (SetPetname uid preferredNickname)] [H.text "use it?"]
+                                          [ H.text <| " (User's preferred nickname is " ++ preferredNickname ++ "; "
+                                          , case model.petnames
+                                                  |> D.toList
+                                                  |> List.filter (\(_, existingName) -> resembles existingName preferredNickname)
+                                                  |> List.map (\(u, _) -> u)
+                                                  of
+                                              [] -> H.button [HE.onClick (SetPetname uid preferredNickname)] [H.text "use it?"]
+                                              similarUids -> H.span []  [ H.text "but that resembles your petnames for: "
+                                                                        , H.span [] <| List.map (viewUid uidcfg) similarUids
+                                                                        ]
                                           , H.text ")"
                                           ]
                                   ]
@@ -221,6 +233,11 @@ messagePartsParser petnames =
 onEnter : Msg -> H.Attribute Msg
 onEnter m =
   HE.on "keydown" (JD.map (\k -> if k == 13 then m else Ignore) HE.keyCode)
+
+resembles : String -> String -> Bool
+resembles s t =
+  -- string resemblance is hard so I'm gonna phone it in
+  (toFloat <| Levenshtein.distance s t) < 0.3 * (toFloat <| String.length s)
 
 main : Program () Model Msg
 main =
